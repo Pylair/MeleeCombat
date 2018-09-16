@@ -1,0 +1,506 @@
+﻿/*
+ * Created by SharpDevelop.
+ * User: erict
+ * Date: 1/29/2018
+ * Time: 2:57 PM
+ * 
+ * To change this template use Tools | Options | Coding | Edit Standard Headers.
+ */
+using System;
+using UnityEngine;
+using System.Collections.Generic;
+using System.Linq;
+using MeleeCombat.MapGeneration.Algorithms;
+
+namespace MeleeCombat.MapGeneration
+{
+
+	public class PropFill : MonoBehaviour
+	{
+
+		public Material mA;
+		public List<PropOverlayGroup> propOverlays;
+		public List<BoundedSpaceTags> tags;
+		public GameObject g1;
+		public GameObject g2;
+		public GameObject g3;
+		public bool s = false;
+	
+		System.Random r = new System.Random();	
+
+		
+		
+		public void run (GameObject parent,Room room,HashSet<Vector3> availablePoints)  {
+			var r0 = new Rect(room.bounds.min.x,room.bounds.min.y,room.bounds.size.x + 1,room.bounds.size.y + 1);
+			
+			var tag = room.tag;
+			var index = -1;
+			PropOverlayGroup overlayGroup = null;
+			
+			if (tags.Contains(tag)) {
+				index = tags.IndexOf(tag);
+				overlayGroup = propOverlays[index];
+			}
+	
+			if (index < 0) return;
+			
+			var white = new List<Vector3>();
+			drawEntrancePath(room,white);
+			var rects = partitionSpace(parent,room,r0,white, new List<Vector3>() ,availablePoints);
+			fill(rects,parent, white);
+		}
+		
+		void drawEntrancePath (Room room, List<Vector3> white) {
+			var entrances = room.getCellsByAttribute(FaceTypes.ENTRANCE);
+			
+			foreach (Cell c in entrances) white.Add(c.center);
+			var edgeMap = EdgeMap.constructEdgemapFromPoints(room.pointsInRoom);
+			var edges = GenerateMap.getDelaunayFromPoints(white).ToList();
+			edges = new Prims().execute(edges).ToList();
+			foreach (Edge e in edges){
+				var path = Dijkstras.ASTAR(edgeMap,e.v1,e.v2);
+				for (int i = 0; i < path.Count -1;i++){
+					Debug.DrawLine(path[i],path[i+1],Color.grey,float.PositiveInfinity,false);
+				}
+				white.AddRange(path);
+			}
+		}
+
+		//arbitrary number that tells partitionSpace the number of cycles to run before giving up
+		int cutoff = 40;
+		
+		public Dictionary<Rect,PropOverlay> partitionSpace (GameObject parent, Room room, Rect r0, List<Vector3> white, List<Vector3> black, HashSet<Vector3> points){
+			var rects = new Dictionary<Rect,PropOverlay>();
+			if (r0.width < 2) return rects;
+
+			var list = new List<Vector3>(points.Except(white));
+			list = list.OrderBy(x => (x - (Vector3)r0.center).magnitude).Reverse().ToList();
+			var POG = propOverlays[0].propOverlays;
+				
+			var propQueue = new Queue<PropOverlay>(POG);
+			
+			for (int q = 0; q < cutoff;q++){
+				
+				
+				if (q == cutoff - 1){
+					Debug.Log(q);
+				}
+				if (list.Count == 0) {
+	
+					break;
+				}
+	
+				var p = list[r.Next(0,list.Count)];
+				
+				var overlay = propQueue.Dequeue();
+				propQueue.Enqueue(overlay);
+				
+				recurse (Vector3.zero,3,points,rects,overlay,p,room,list,white,black);
+				
+			}
+			
+			white = points.Except(black).ToList();
+			
+			foreach (Vector3 v in white) GameObject.Instantiate(g1).transform.position = v;
+			foreach (Vector3 v in black) GameObject.Instantiate(g2).transform.position = v;
+			
+
+			
+			
+			if (! check(new HashSet<Vector3>(white))){
+				Debug.DrawLine(r0.min,r0.max,Color.red,float.PositiveInfinity,false);
+			}
+			return rects;
+
+		}
+		
+		bool check (List<Vector3> list, List<Vector3> white, List<Vector3> black){
+			var temp = list.ToList();
+			temp.AddRange(white);
+			temp.RemoveAll(black.Contains);
+			return check (new HashSet<Vector3>(temp));
+		}
+		
+		bool recurse (Vector3 direction,int iter, HashSet<Vector3> points, Dictionary<Rect, PropOverlay> rects,PropOverlay overlay, Vector3 p, Room room, List<Vector3> list, List<Vector3> white, List<Vector3> black) {
+			if (iter == 0 ) return false;
+			var tempWhite = new List<Vector3>();
+			var tempBlack = new List<Vector3>();
+			
+			var size = overlay.spaceRequirement;
+
+			var allocateBlackSpaceSucceeded = allocateBlackSpace(overlay,size,p,room,list,tempBlack) ;
+			
+			if (! allocateBlackSpaceSucceeded){
+				return false;
+			}
+			
+			
+			if (! check(list,white,black)){
+				white.Add(p);
+				return false;
+			}
+			black.AddRange(tempBlack);	
+			list.RemoveAll(tempBlack.Contains);
+			
+			
+
+			rects[new Rect(p,(Vector2)size)] = overlay;
+
+			allocateWhiteSpace(direction,size,p,list,black,tempWhite, white);
+			
+	
+			if (overlay.extendable){
+				if (direction == Vector3.zero){	
+					foreach (Vector3 v0 in VoxelIterators.VonNeumanNeighbors()){
+						recurse(v0, iter - 1,points,rects,overlay,p + v0,room,list,white,black);
+					}
+				} else {
+					recurse(direction, iter - 1,points,rects,overlay,p + direction,room,list,white,black);
+				}
+			}
+			return allocateBlackSpaceSucceeded;
+
+		}
+
+		//v2
+		
+		bool allocateBlackSpace (PropOverlay overlay, Vector3 size, Vector3 p, Room room, List<Vector3> list, List<Vector3> tempBlack) {
+			var l = size.x;
+			var h = size.y;
+			for (int i = 0; i < l;i++){
+				for (int j = 0; j < h;j++){
+					var p2 = (p + new Vector3(i,j));
+					if (list.Contains(p2)  && positionSuitableForProp(overlay,p2,room,list) ){ 
+						tempBlack.Add(p2);
+					} else {
+						return false;
+					}
+				}
+			}
+			
+			return true;
+		}
+		
+		void allocateWhiteSpace (Vector3 direction, Vector3 size, Vector3 p, List<Vector3> list,List<Vector3> black, List<Vector3> tempWhite, List<Vector3> white) {
+			var l = size.x;
+			var h = size.y;
+			for (int i = -1; i < l + 1;i++){
+				for (int j = -1; j < h + 1;j++){
+					var p2 = (p + new Vector3(i,j));
+					if (! black.Contains(p2))
+					tempWhite.Add(p2);
+				}
+			}
+			
+			if (direction == Vector3.zero){
+				foreach (Vector3 v0 in VoxelIterators.VonNeumanNeighbors()){
+					tempWhite.Remove(v0 + p);
+			
+				}
+			} else {
+				tempWhite.Remove(direction + p);
+			}
+			list.RemoveAll(tempWhite.Contains);
+			white.AddRange(tempWhite); 
+		}
+
+		void fill (Dictionary<Rect,PropOverlay> rects, GameObject parent, List<Vector3> white) {
+		
+			foreach (Rect r in rects.Keys){
+				var unit = rects[r];
+						
+				var x = (int)r.width/unit.spaceRequirement.x;
+				var y = (int)r.height/unit.spaceRequirement.y;
+				
+				
+				var neighbors = new List<Vector3>();
+						
+				for (int i = 0; i < x;i++){
+					for (int j = 0; j < y;j++){
+						var min = (Vector3)r.min + new Vector3(i * unit.spaceRequirement.x,j * unit.spaceRequirement.y,0);
+						var bounds = new Bounds(min,Vector3.zero);
+						foreach (Vector3 p2 in iterateWithinRect(min,unit.spaceRequirement)){
+							foreach (Vector3 v0 in VoxelIterators.VonNeumanNeighbors()){
+								if (white.Contains( v0 + p2)){
+									neighbors.Add(v0);
+								}
+							}
+						}
+					}	
+				}
+				
+				var vertical = Vector3.forward;
+				var grouping = neighbors.GroupBy(a => a);
+				var groupList = grouping.OrderByDescending(b => b.Count());
+				var horizontal = groupList.First().First();
+				
+				
+				
+
+				
+				for (int i = 0; i < x;i++){
+					for (int j = 0; j < y;j++){
+						var min = (Vector3)r.min + new Vector3(i * unit.spaceRequirement.x,j * unit.spaceRequirement.y,0);
+						var bounds = new Bounds(min,Vector3.zero);
+						foreach (Vector3 p2 in iterateWithinRect(min,unit.spaceRequirement)){
+						      bounds.Encapsulate(new Bounds(p2,Vector3.one));   	
+						}
+						var prop = GameObject.Instantiate(rects[r].prop);
+						Aligner.AlignBoundingBoxFaceToBoundingBoxFace(horizontal,vertical,bounds,prop);
+						prop.transform.parent = parent.transform;
+					}	
+				}
+			}
+		}
+		
+		
+		
+		IEnumerable<Vector3> iterateWithinRect (Vector3 min, Vector3 spaceRequirement){
+			for (int u = 0; u < spaceRequirement.x;u++){
+				for (int v = 0; v < spaceRequirement.y;v++){
+					yield return min + new Vector3( u,v,0);
+					
+				}
+			}
+		}
+		
+		bool check (HashSet<Vector3> group){
+			var l2 = new HashSet<Vector3>();
+			int count = 0;
+			while (group.Count > 0){
+				var v = group.First();
+				recurse(v,group);
+				count++;
+				
+			}
+			return count == 1;
+		}
+		
+		void recurse (Vector3 v, HashSet<Vector3> group){
+			if (! group.Contains(v)) return;
+			group.Remove(v);
+			foreach (Vector3 v0 in VoxelIterators.VonNeumanNeighbors()){
+				recurse (v0 + v,group);
+			}
+		}
+		
+		public bool positionSuitableForProp (PropOverlay overlay, Vector3 v, Room room, IEnumerable<Vector3> availablePointsCopy) {
+			if (! availablePointsCopy.Contains(v)) return false;
+			var cell = room.cells[v];
+			var walls= cell.findWallWithAttribute(FaceTypes.WALL);
+			
+			bool containsRightAmountOfWalls = overlay.numberOfWalls.Contains(walls.Count);
+			bool containsNoExcludedTags = true;
+		
+			foreach (FaceTypes excludedTag in overlay.excludedTags){
+				var count = cell.findWallWithAttribute(excludedTag).Count;
+				if (count > 0) {
+					containsNoExcludedTags = false;
+				}
+			}
+						
+			return containsNoExcludedTags && containsRightAmountOfWalls ;
+			
+		}
+			
+		/*public bool getHasRequiredSpace (Vector3 position, Vector3 spaceRequirement, IEnumerable<Vector3> availablePoints){
+			for (int i = 0; i < spaceRequirement.x;i++){
+				for (int j = 0; j < spaceRequirement.y;j++){
+					for (int k = 0; k < spaceRequirement.z;k++){
+						var v = new Vector3(i,j,k);
+						
+						if (! availablePoints.Contains(position + v)) {
+							return false;
+						}
+					}
+				}
+			}
+			return true;
+		}	*/
+		
+		/*void fill (GameObject parent,Vector3 v0, int iterations, PropOverlay overlay, Vector3 v, Room room, HashSet<Vector3> availablePointsCopy, List<Vector3> black, List<Vector3> white){
+			if (iterations < 0) return;
+			
+			if (positionSuitableForProp(overlay,v,room,availablePointsCopy)){
+				
+
+				var cell = room.cells[v];
+				var walls= cell.findWallWithAttribute(FaceTypes.WALL);
+				Vector3 forward = Vector3.forward;
+				Vector3 up;
+
+				
+				var neighbors = new List<Vector3>();
+				foreach (Vector3 d in VoxelIterators.VonNeumanNeighbors()){
+					if (white.Contains( d + v)){
+						neighbors.Add(d);
+					}
+				}
+				if (neighbors.Count == 0){
+					up = Vector3.up;
+				} else {
+					up = neighbors[r.Next(0,neighbors.Count)];
+				}
+				
+				addProp(parent,v,availablePointsCopy,overlay,room,up,forward);
+				black.Remove(v);
+				
+				foreach (Vector3 x in VoxelIterators.VonNeumanNeighbors()){
+					v0 = x;
+					var sr = overlay.spaceRequirement;
+					var v2 = new Vector3(v0.x * sr.x, v0.y * sr.y,v0.z * sr.z)  + v;
+					fill(parent,v0,iterations -1, overlay,v2,room,availablePointsCopy,black,white);
+				}
+			}
+			
+		}*/
+		
+		/**/
+		
+		/**/
+		
+		/*void addProp (GameObject parent,Vector3 position, HashSet<Vector3> availablePoints, PropOverlay overlay, Room room, Vector3 forward, Vector3 up){
+			var spaceRequirement = overlay.spaceRequirement;
+			var b = room.cells[position].bounds;
+			var bounds = new Bounds(b.center,b.size);
+			for (int i = 0; i < spaceRequirement.x;i++){
+				for (int j = 0; j < spaceRequirement.y;j++){
+					for (int k = 0; k < spaceRequirement.z;k++){
+						var v = new Vector3(i,j,k);
+						var c2 = room.cells[v + position];
+						bounds.Encapsulate(c2.bounds.max);
+						availablePoints.Remove(v + position);
+					}
+				}
+			}
+			
+			var prop = GameObject.Instantiate(overlay.prop);
+			
+			Aligner.AlignBoundingBoxFaceToBoundingBoxFace(forward,up,bounds,prop);
+			prop.transform.parent = parent.transform;
+		}*/
+		
+		/*int numberofoccupiedneighbors (HashSet<Vector3> occupiedPoints, Vector3 v0){
+			int count = 0;
+			foreach (Vector3 v in VoxelIterators.VonNeumanNeighbors()){
+				var v2 = v + v0;
+			
+				if (occupiedPoints.Contains(v2)){
+					count++;
+				}
+			}
+			return count;
+		}*/
+		
+		
+		/*void lowerEdgeWeight (Vector3 v, EdgeMap edgeMap, List<Vector3> white){
+			if (!edgeMap.edgeMap.Keys.Contains(v)) return;
+			foreach (Edge e in edgeMap[v]){
+				if (white.Contains(e.v1) && white.Contains(e.v2)){
+					e.weight = .1f;
+				}
+			}
+		}*/
+
+		/*void partitionSpace (List<Vector3> white, List<Vector3> black, HashSet<Vector3> totalPoints) {
+			var points = new List<Vector3>(totalPoints);
+			var edgemap = EdgeMap.constructEdgemapFromPoints(points);
+			
+			if (white.Count == 0){
+				var v = points[r.Next(0,points.Count)];
+				points.Remove(v);
+				white.Add(v);
+			}
+			
+			Dictionary<Vector3,Color> dict = new Dictionary<Vector3, Color>();
+			
+			
+			while (points.Count > 0){
+				var v1 = points[r.Next(0,points.Count)];
+				points.Remove(v1);
+				bool dontSearch = false;
+				foreach (Vector2 x in VoxelIterators.VonNeumanNeighbors()){
+					if (white.Contains(v1 + (Vector3)x)){
+						dontSearch = true;
+					}
+				}
+				if (dontSearch) continue;
+				Vector3 v2 = white[r.Next(0,white.Count)];
+				
+		
+				
+				var path = Dijkstras.dijkstras(edgemap,v1,v2);
+		
+				for (int j = 0; j < path.Count -1;j++){
+					var x1 = path[j];
+					var x2 = path[j + 1];
+					var e0 = edgemap.edgeMap[x1].Intersect(edgemap.edgeMap[x2]).ToList()[0];
+					Debug.DrawLine(x1,x2,Color.red,float.PositiveInfinity,false);
+					e0.weight = .1f;
+					
+					var v3 = path[j];
+					points.Remove(v3);
+					white.Add(v3);
+					black.Remove(v3);
+					dict[v3] = Color.white;
+					
+					foreach (Vector3 v4 in VoxelIterators.VonNeumanNeighbors()){
+						var v5 = v4 + v3;
+						points.Remove(v5);
+						if (! white.Contains(v5) && totalPoints.Contains(v5)){
+							black.Add(v5);
+							dict[v5] = Color.black;
+							points.Remove(v5);
+						}
+					}
+				}			
+			}
+			
+			white.Clear();
+			black.Clear();
+			foreach (Vector3 v in dict.Keys){
+				if (dict[v] == Color.white) white.Add(v);
+				
+				else black.Add(v);
+			}
+		}	*/
+	}
+}
+
+
+
+/*public void Update (){
+			if (s){
+				s = false;
+				test();
+			}
+		}		
+		public void test(){
+			
+		}*/
+			
+		/*public PropOverlay getPropOverlayForPoint (PropOverlayGroup pog,Vector3 v, Room room, HashSet<Vector3> availablePointsCopy){
+			var cells = room.cells[v];
+			var propOverlayList = pog.propOverlays;
+			var eligibleProps =  propOverlayList.FindAll(x => positionSuitableForProp(x,v,room,availablePointsCopy)).ToList();
+			if (eligibleProps.Count ==0 ) return null;
+			return eligibleProps[r.Next(0,eligibleProps.Count)];
+		}*/
+		
+		/*Vector3 poprandomElement (List<Vector3> points){
+	
+			var v = points.Last();
+			points.RemoveAt(points.Count -1);
+			return v;
+		}
+	
+		int checkNeighbors (Vector3 v, List<Vector3> points){
+			int i = 0;
+			foreach (Vector3 v2 in VoxelIterators.VonNeumanNeighbors()){
+				if (points.Contains(v + v2)) i++;
+			}
+			return i;
+		}
+		*/
+
+	

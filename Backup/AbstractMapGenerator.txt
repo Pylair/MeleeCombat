@@ -1,0 +1,306 @@
+﻿/*
+ * Created by SharpDevelop.
+ * User: eric
+ * Date: 8/21/2017
+ * Time: 4:28 PM
+ * 
+ * To change this template use Tools | Options | Coding | Edit Standard Headers.
+ */
+using System;using UnityEngine;
+using UnityEngine.UI;
+using System.Collections.Generic;
+using GeoAPI.Geometries;
+using NetTopologySuite.Geometries;
+using NetTopologySuite.Algorithm;
+using NetTopologySuite.Operation.Union;
+using System.Linq;
+
+namespace MeleeCombat.MapGeneration
+{
+	using Random = System.Random;
+	
+	public class A
+	{
+		Random random = new Random();
+		int minRoomWidth = 2;
+		int minRoomHeight = 2;
+		Color roomColor = Color.red;
+		public int xCount;
+		public int zCount;
+		public bool trigger;
+		Dictionary<Vector3,BoundedSpace> abstractMap;
+	
+		public void Awake () {
+			abstractMap = new Dictionary<Vector3, BoundedSpace>();
+		}
+		
+		float subDivsionFactor = 1.0f;
+		
+		Polygon subDivide (Polygon p){
+			var coords = new List<Coordinate>(p.ExteriorRing.Coordinates);
+			var list = new List<Coordinate>();
+		
+			for (int i = 0; i < coords.Count - 1;i++){
+				var c0 = coords[i];
+				var c1 = coords[i+ 1];
+				var dx = (c1.X - c0.X);
+				var dy = (c1.Y - c0.Y);
+				var max =  Math.Max(Math.Abs(dx),Math.Abs(dy)) * subDivsionFactor;
+				dx = dx/max;
+				dy = dy/max;
+				for (int j = 0; j < max;j++){
+					list.Add(new Coordinate(c0.X +  dx * j,c0.Y +  dy * j));
+				}
+			}
+			list.Add(coords[0]);
+			
+			return new Polygon(new LinearRing(list.ToArray()));
+		}
+		
+		Polygon round (Polygon p){
+			var coods = p.ExteriorRing.Coordinates;
+			for (int i = 0; i < coods.Length;i++){
+				var x = Math.Round(coods[i].X);
+				var y = Math.Round(coods[i].Y);
+				var z = Math.Round(coods[i].Z);
+				coods[i] = new Coordinate(x,y,z);
+			}
+			return new Polygon(new LinearRing(coods));
+		}
+		
+		
+		Vector3 ctv (Coordinate c){
+			
+			return new Vector3((float)c.X,(float)c.Y,0);
+		}
+		
+		Coordinate vtc (Vector3 v){
+			return new Coordinate((double)v.x,(double)v.y,(double)v.z);
+		}
+		
+		bool isCorner (List<Coordinate> coords, int i){
+			var c = coords[i];
+			Coordinate c0;
+			if (i == 0){
+				c0 = coords[coords.Count - 2];
+			} else {
+				c0 = coords[i - 1];
+			} 
+			var c1 = coords[i+ 1];
+				
+			var v0 = ctv(c0);
+			var v1 = ctv(c);
+			var v2 = ctv(c1);
+			var a1 = v1 - v0;
+			var a2 = v2 - v1;
+			return Math.Abs(Vector3.Angle(a1,a2) - 90) < 10;
+		}
+		
+		Vector3 getWallForward (List<Coordinate> coords, int i){
+			var c = coords[i];
+			Coordinate c0;
+			if (i == 0){
+				c0 = coords[coords.Count - 2];
+			} else {
+				c0 = coords[i - 1];
+			} 
+			var c1 = coords[i+ 1];
+				
+			var v0 = ctv(c0);
+			var v1 = ctv(c);
+			var v2 = ctv(c1);
+			var a1 = v1 - v0;
+			var a2 = v2 - v1;
+			return new Vector3((float)a2.x,0,(float)a2.y);
+		}
+		
+		void applyAbstractMapGeometries (){
+			var size = new Vector3(1,.5f,1);
+			var offset = Vector3.zero;
+			
+			BoundedSpace space = new BoundedSpace(FaceTypes.CORNER,new Bounds(Vector3.zero,Vector3.one /subDivsionFactor),Vector3.forward);
+			UnaryUnionOp op = new UnaryUnionOp(dungeonPolygon.ToArray());
+			
+			var masterPolygon = round((Polygon)op.Union());
+			var corners = new List<Coordinate>(masterPolygon.Coordinates);
+			masterPolygon = subDivide(masterPolygon);
+			var coords = new List<Coordinate>( masterPolygon.Coordinates);
+			
+		
+			for (int i = 0; i < coords.Count- 1;i++){
+				if (isCorner(coords,i)){
+					space.forward = getWallForward(coords,i);
+					space.tag = FaceTypes.CORNER;
+				} else {
+					space.forward = getWallForward(coords,i);
+					space.tag = FaceTypes.WALL;
+				}
+				addBounds(new Vector3((int)coords[i].X,0,(int)coords[i].Y),size,offset,space);
+			}
+			
+			var envelope = masterPolygon.EnvelopeInternal;
+			for (int i = (int)envelope.MinX; i < envelope.MinX + envelope.Width;i++){
+				for (int j = (int)envelope.MinY; j < envelope.MinY + envelope.Height;j++){
+					if (masterPolygon.Contains(new Point(i,j))){
+						space.tag = FaceTypes.CENTER;
+						//Debug.DrawRay(new Vector3(i,0,j),Vector3.up,Color.red,float.PositiveInfinity);
+						addBounds(new Vector3(i,0,j),size,offset,space);
+					} 
+				}
+			}
+			
+			setNeighbors();
+		}
+		
+		void setNeighbors () {
+			var keys = abstractMap.Keys.ToList();
+			for (int i = 0; i < keys.Count;i++){
+				var val = abstractMap[keys[i]];
+				List<BoundedSpace> neighbors = new List<BoundedSpace>();
+				for (int x = -1; x < 2;x++){
+					for (int y = -1; y < 2;y++){
+						for (int z = -1; z < 2;z++){
+							if (x == 0 && y == 0 && z ==0){
+								continue;
+							}
+							if (x != 0 && y != 0 && z != 0) continue;
+						
+						
+							var newKey = new Vector3(x,0,y) + keys[i];
+							if (abstractMap.ContainsKey(newKey)){
+								neighbors.Add(abstractMap[newKey]);
+							}
+						}
+					}
+				}
+				val.setNeighbors(neighbors);
+			}
+		}
+
+		public void addBounds (Vector3 gridPosition,Vector3 size,Vector3 offset,BoundedSpace b){
+			var count = abstractMap.Count;
+			var v = PartitionedVoxelSpace.copy(gridPosition,gridPosition,size,offset,b);
+			if (! abstractMap.ContainsValue(v)){
+				abstractMap[v.bounds.center] = v;
+			} else {
+				var v2 = abstractMap[v.bounds.center];
+				v2.addNeighbors(v.linkedBoundedSpaces);
+				abstractMap[v.bounds.center] = v2;
+			}
+		}
+		
+
+		public List<BoundedSpace> generateAbstractMap (PartitionedVoxelSpace pvs, int x, int z) {
+			Awake();
+			var map = new Texture2D(x,z);
+			setDungeonSpace(map);
+			applyAbstractMapGeometries();
+
+			return new List<BoundedSpace>(abstractMap.Values);
+		}
+		
+		int minChildren = 1;
+		int maxChildren = 10;
+		int minNodeSize = 5;
+		int maxNodeSize = 10;
+		int minNodeDistance = 40;
+		int maxNodeDistance = 60;
+		Rect boundingRect;
+
+		List<Polygon> dungeonPolygon;
+		
+		
+		void setDungeonSpace (Texture2D map) {
+			minChildren = 2;
+			maxChildren = 4;
+			minNodeSize = 2;
+			maxNodeSize = 4;
+			minNodeDistance = 5;
+			maxNodeDistance = 7;
+			for (int i =0 ;i < 1;i++){
+				var x = random.Next((int)map.width/4,(int)map.width * 3 / 4);
+				var y = random.Next((int)map.height /4,(int)map.height  * 3 / 4);
+				var nodeSize = 5;	
+				var node = new Rect(x - nodeSize/2,y - nodeSize/2,nodeSize,nodeSize);
+				spread(node,Color.red,3,true,map);
+			}
+			map.Apply(false,false);
+		}
+		
+		void drawHallway (Rect previous, Rect current,Color color,Texture2D map) {
+			var p1X = (int)previous.x + previous.width/2;
+			var p2X = (int)current.x  + current.width/2;
+			var p1Y = (int)previous.y + previous.height/2;
+			var p2Y = (int)current.y + current.height/2;
+			
+			var w = Math.Abs(p1X - p2X);
+			var h = Math.Abs(p1Y - p2Y);
+			if (w > h){
+				h = random.Next(1,3);
+			} else {
+				w = random.Next(1,3);
+			}
+			drawScaledRect(new Rect(Math.Min(factor * p1X,factor * p2X),Math.Min(factor * p1Y,factor * p2Y),w * factor,h * factor),color,map);
+			
+		}
+		
+		int factor = 1;
+		int radiusFactor = 1;
+		Dictionary<Color,List<Vector3>> colorMap = new Dictionary<Color,List<Vector3>>();
+		
+		
+		void drawScaledRect (Rect node,Color color,Texture2D map){
+			var x = (int)(factor * node.x) ;
+			var y = (int)(factor * node.y) ;
+			var w = (int)factor * node.width;
+			var h = (int)factor * node.height;
+			var rect = envelopeToGeometry(new Envelope((int)x,(int)(x + w), (int)y, (int)(y +h)));
+			
+			/*for (int i = x; i < x + w;i++){
+				for (int j = y;j < y + h;j++){
+					map.SetPixel(i,j,color);
+					if (! colorMap.ContainsKey(color)){
+						colorMap[color] = new List<Vector3>();
+					}
+					colorMap[color].Add(new Vector3(i,0,j));
+				}
+			}*/
+			
+			if (dungeonPolygon == null){
+				dungeonPolygon  = new List<Polygon>();
+				
+			} 
+			dungeonPolygon.Add(rect);
+		}
+		
+		public Polygon envelopeToGeometry(Envelope e){
+			GeometryFactory fac = new GeometryFactory();
+			return (Polygon)fac.CreatePolygon(new LinearRing(new Coordinate[]{new Coordinate(e.MinX,e.MinY),new Coordinate(e.MinX,e.MaxY), new Coordinate(e.MaxX,e.MaxY), new Coordinate(e.MaxX,e.MinY), new Coordinate(e.MinX,e.MinY)}));
+		}
+		
+		void spread (Rect node ,Color color,int iterations,bool drawLinks,Texture2D map){
+			drawScaledRect(node,color,map);
+			iterations--;
+			if (iterations < 0) return;
+			var count = random.Next(minChildren,maxChildren);
+			float angle = 0;
+			int linkCount = 0;
+			for (int i = 0; i < count;i++){
+				var nodeSize =random.Next(minNodeSize,maxNodeSize);
+				var radius = radiusFactor *random.Next(minNodeDistance,maxNodeDistance);
+				angle += random.Next(0,4) * 90;
+				var newPositionX = (float)(node.x +node.width/2 + (Math.Cos(angle * Math.PI/180) * radius));
+				var newPositionY = (float)(node.y + node.height/2 + (Math.Sin(angle * Math.PI/180) * radius));
+				var newNode = new Rect(newPositionX - nodeSize/2,newPositionY - nodeSize/2,nodeSize,nodeSize);
+				if (drawLinks){
+					drawHallway(node,newNode,color,map);
+				}
+				spread(newNode,color,iterations,drawLinks,map);
+			}
+		}
+
+		
+		
+		
+	}
+}
